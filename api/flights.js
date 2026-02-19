@@ -1,11 +1,8 @@
-// api/flights.js — Vercel serverless function
-// Proxies OpenSky Network ADS-B data to avoid CORS issues in the browser.
-// OpenSky returns an array of state vectors. No API key required for anonymous access
-// (rate limited to ~100 requests/day per IP). For higher limits, sign up free at
-// https://opensky-network.org and add OPENSKY_USER / OPENSKY_PASS env vars in Vercel.
+// api/flights.js — Vercel serverless function (CommonJS, Node 18+)
+const https = require('https');
 
-export default async function handler(req, res) {
-  const { lat, lon, d = 1.4 } = req.query;
+module.exports = async function handler(req, res) {
+  const { lat, lon, d = '1.4' } = req.query;
 
   if (!lat || !lon) {
     return res.status(400).json({ error: 'lat and lon are required' });
@@ -15,14 +12,12 @@ export default async function handler(req, res) {
   const lonF = parseFloat(lon);
   const dF   = parseFloat(d);
 
-  // Bounding box
   const lamin = latF - dF;
   const lamax = latF + dF;
   const lomin = lonF - dF;
   const lomax = lonF + dF;
 
-  // Build URL — add basic auth if credentials are available
-  let openSkyUrl = `https://opensky-network.org/api/states/all?lamin=${lamin}&lomin=${lomin}&lamax=${lamax}&lomax=${lomax}`;
+  const path = `/api/states/all?lamin=${lamin}&lomin=${lomin}&lamax=${lamax}&lomax=${lomax}`;
 
   const headers = { 'Accept': 'application/json' };
   if (process.env.OPENSKY_USER && process.env.OPENSKY_PASS) {
@@ -31,25 +26,45 @@ export default async function handler(req, res) {
   }
 
   try {
-    const upstream = await fetch(openSkyUrl, { headers });
+    const data = await new Promise((resolve, reject) => {
+      const options = {
+        hostname: 'opensky-network.org',
+        path: path,
+        method: 'GET',
+        headers: headers,
+      };
 
-    if (!upstream.ok) {
-      // If rate-limited, return empty rather than crashing
-      if (upstream.status === 429) {
-        return res.status(200).json([]);
-      }
-      throw new Error(`OpenSky returned ${upstream.status}`);
-    }
+      const request = https.request(options, (resp) => {
+        if (resp.statusCode === 429) {
+          resolve({ states: [] });
+          return;
+        }
+        if (resp.statusCode !== 200) {
+          reject(new Error(`OpenSky returned ${resp.statusCode}`));
+          return;
+        }
+        let body = '';
+        resp.on('data', chunk => body += chunk);
+        resp.on('end', () => {
+          try { resolve(JSON.parse(body)); }
+          catch(e) { reject(new Error('Invalid JSON from OpenSky')); }
+        });
+      });
 
-    const data = await upstream.json();
-    // data.states is an array of state vectors, or null if none
-    const states = data.states || [];
+      request.on('error', reject);
+      request.setTimeout(8000, () => {
+        request.destroy();
+        reject(new Error('OpenSky request timed out'));
+      });
+      request.end();
+    });
 
-    // Cache for 15 seconds to be polite to OpenSky
     res.setHeader('Cache-Control', 's-maxage=15, stale-while-revalidate=30');
-    return res.status(200).json(states);
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    return res.status(200).json(data.states || []);
+
   } catch (err) {
-    console.error('OpenSky fetch error:', err);
+    console.error('OpenSky fetch error:', err.message);
     return res.status(500).json({ error: err.message });
   }
-}
+};
