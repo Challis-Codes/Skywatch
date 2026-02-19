@@ -1,0 +1,9 @@
+{
+  "name": "skywatch",
+  "version": "1.0.0",
+  "description": "Find flights visible with the naked eye from your current location",
+  "license": "MIT",
+  "engines": {
+    "node": ">=18"
+  }
+}
